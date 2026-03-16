@@ -1,6 +1,6 @@
 ---
 name: create-user-stories
-description: Generate Jira-ready user stories with acceptance criteria from `.flow/features/<slug>/spec.md` and `tasks.md`. Outputs one markdown file per story in a Confluence-friendly table format. Use this skill after `create-feature` has produced a spec and task breakdown. Trigger whenever the user mentions "user stories", "Jira stories", "acceptance criteria", "story breakdown", or wants to convert a feature spec into ticketable work items.
+description: Generate Jira-ready user stories with acceptance criteria from `.flow/features/<slug>/spec.md` and `tasks.md`. Writes from an experienced product owner's perspective — business-focused, outcome-driven, free of technical jargon. Outputs one markdown file per story in a Confluence-friendly table format. Use this skill after `create-feature` has produced a spec and task breakdown. Trigger whenever the user mentions "user stories", "Jira stories", "acceptance criteria", "story breakdown", or wants to convert a feature spec into ticketable work items.
 disable-model-invocation: true
 ---
 
@@ -8,12 +8,32 @@ disable-model-invocation: true
 
 ## Purpose
 
-Convert feature planning docs (`spec.md` and `tasks.md`) into individual user story files, each with structured acceptance criteria in markdown table format ready to copy-paste into Confluence or Jira.
+Convert feature planning docs (`spec.md` and `tasks.md`) into individual user story files written from the perspective of an experienced product owner. Stories focus on **what the user needs and why** — never on how the system implements it. Each story includes structured acceptance criteria in markdown table format ready to copy-paste into Confluence or Jira.
+
+## Voice & Tone
+
+Write every story as a seasoned product owner would — someone who deeply understands the user's world and speaks their language. This means:
+
+- **Lead with outcomes, not outputs.** "The customer can track their order in real time" not "The system exposes a WebSocket endpoint for order status updates."
+- **Describe behavior the user can see and touch.** If the user can't observe it happening, it probably doesn't belong in the story description. Acceptance criteria should read like a walkthrough of someone actually using the product.
+- **Use plain business language.** Avoid database tables, API endpoints, code patterns, service names, or architecture terms. A stakeholder or QA tester who has never seen the codebase should be able to read any story and understand exactly what "done" looks like.
+- **Name real personas.** Instead of "As a user", write "As a returning customer", "As a hiring manager", "As a warehouse operator" — whoever the actual person is. Draw these from the problem statement in `spec.md`.
+- **Frame technical work as enablement.** When a task from `tasks.md` is purely infrastructure (e.g., CI setup, database migration), translate it into the user-facing capability it enables. Only use "As a developer" when the developer IS the end user of the feature.
+
+### Language examples
+
+| Instead of this (too technical) | Write this (product owner voice) |
+|---|---|
+| "API returns 200 with paginated JSON response" | "Search results load quickly and the user can browse through pages of results" |
+| "Database migration adds `status` column to orders table" | "Order status is visible to the customer at every stage" |
+| "Redis cache invalidates after 5 min TTL" | "The customer always sees up-to-date information (refreshed within 5 minutes)" |
+| "JWT token is issued on successful authentication" | "The user stays logged in securely across sessions" |
+| "Webhook fires on payment completion" | "The seller is notified immediately when a payment is received" |
 
 ## Boundaries
 
 - Story generation only — does not modify the source `spec.md` or `tasks.md`
-- Never implement or propose implementation code
+- Never include implementation details, architecture decisions, or code references in the story body
 - If asked to implement: `Implementation is out of scope for this skill. Use run-task to implement.`
 - Writable files limited to:
   - `.flow/features/<slug>/stories/US-NNN-<short-name>.md` (one per story)
@@ -32,47 +52,47 @@ Convert feature planning docs (`spec.md` and `tasks.md`) into individual user st
    - `## TL;DR` for the high-level problem/outcome/boundaries
    - `## Acceptance Checks` for measurable pass/fail criteria
    - `## Key Scenarios` for trigger/condition → expected outcome pairs
-   - `## Durable Decisions` for constraints that shape stories
-   - `## Must-Fail Gates` for stop/rollback conditions
+   - `## Durable Decisions` for constraints that shape stories (but translate them into user-facing impact)
+   - `## Must-Fail Gates` for stop/rollback conditions (express as "what the user should never experience")
    - `## Out of Scope` to know what NOT to write stories for
 2. Read `.flow/features/<slug>/tasks.md` — extract:
-   - Phase structure (N.M numbered tasks)
-   - Verification checklists per phase
-   - File references for each task
+   - Phase structure (N.M numbered tasks) — use for sequencing and dependencies only
+   - Verification checklists per phase — translate technical checks into user-observable outcomes
+   - File references — use internally for traceability but do NOT surface in story content
 3. Read `.flow/memory/overview.md` (if present) for project-wide context
 4. If equivalent stories already exist, warn user and ask whether to overwrite or append
 
 ## Story Derivation Rules
 
-The goal is to produce stories that a developer can pick up and work on independently. Each story should be a thin vertical slice — not a horizontal layer.
+The goal is to produce stories that describe **valuable increments of user-facing capability**. Each story should deliver something a real person can see, use, or benefit from.
 
 ### Mapping tasks to stories
 
-- Each phase in `tasks.md` typically maps to 1–3 user stories
-- Group tightly coupled tasks (e.g., a model + its migration + its API endpoint) into one story
-- Split tasks that serve different user-facing outcomes into separate stories
-- A task that is purely technical (e.g., "set up CI config") becomes a **technical story** with the persona "As a developer"
-- Never create a story with zero acceptance criteria — if you can't define "done", the story is too vague
+- Group tasks by the **user outcome** they collectively deliver, not by technical layer
+- A phase in `tasks.md` that touches backend + frontend + tests for one user capability = one story
+- Split when a phase delivers multiple distinct things a user would notice separately
+- Purely technical tasks (CI, infra, migrations) should be folded into the story they enable — they don't get their own story unless the developer IS the end user
+- Never create a story with zero acceptance criteria — if you can't describe what "done" looks like to a user, the story is too vague or too technical
 
 ### Story sizing
 
 - Each story should be completable in 1–3 days of work
-- If a story feels larger, split it and note the dependency
+- If a story feels larger, split it along user-outcome boundaries and note the dependency
 - If a story feels trivially small (< 2 hours), consider merging with a related story
 
 ### Acceptance criteria derivation
 
-- Pull directly from `## Acceptance Checks` in `spec.md` where they map to this story
-- Pull from verification checklists in `tasks.md` for the relevant phase
-- Pull from `## Key Scenarios` where the trigger/condition relates to this story
-- Add edge cases and error paths that the spec implies but doesn't enumerate
-- Each criterion must be independently testable — a QA engineer should be able to verify it without reading the spec
+- Start from `## Acceptance Checks` in `spec.md` — rewrite any technical checks into user-observable behaviors
+- Translate verification checklists from `tasks.md` into what the user sees, not what the system does
+- Draw from `## Key Scenarios` — these are already in trigger/outcome format, which maps naturally to Given/When/Then
+- Add realistic edge cases from the user's perspective: what happens when they make a mistake, lose connectivity, enter unexpected data
+- Each criterion must be verifiable by someone who has never seen the codebase — describe it as a product walkthrough, not a test script
 
 ## Quiz Before Writing
 
 Before generating story files, present the proposed story list to the user:
 
-- Numbered list with story title + 1-line scope
+- Numbered list with story title + 1-line user outcome
 - Suggested personas for each
 - Ask: "Too many? Too few? Merge or split any stories?"
 - Iterate until user approves the breakdown
@@ -88,45 +108,49 @@ Before generating story files, present the proposed story list to the user:
 
 ## User Story
 
-**As a** <persona>,
-**I want** <capability/action>,
-**So that** <business value/outcome>.
+**As a** <specific persona>,
+**I want** <capability described in the user's own language>,
+**So that** <tangible business value or personal benefit>.
 
-## Details
+## Context
 
-<2-4 sentences of context. Reference the relevant decisions from spec.md
-that constrain this story. Mention which phase/tasks from tasks.md this
-story covers.>
+<2-4 sentences written in plain language. Explain WHY this matters to the
+user. What problem does this solve for them? What can they do after this
+that they couldn't do before? Reference any business rules or constraints
+that affect the experience — but describe them as the user would
+understand them, not as technical decisions.>
 
 ## Acceptance Criteria
 
-| # | Criterion | Given | When | Then |
-|---|-----------|-------|------|------|
-| 1 | <short name> | <precondition> | <action> | <expected result> |
-| 2 | <short name> | <precondition> | <action> | <expected result> |
+| # | Scenario | Given | When | Then |
+|---|----------|-------|------|------|
+| 1 | <user-friendly name> | <situation the user is in> | <action the user takes> | <what the user sees or experiences> |
+| 2 | <user-friendly name> | <situation the user is in> | <action the user takes> | <what the user sees or experiences> |
 | ... | | | | |
 
-## Edge Cases & Error Handling
+## What Could Go Wrong
 
-| # | Scenario | Expected Behavior |
-|---|----------|-------------------|
-| 1 | <error/edge scenario> | <what should happen> |
+| # | Situation | What the User Should Experience |
+|---|-----------|-------------------------------|
+| 1 | <realistic problem from the user's perspective> | <graceful outcome the user sees> |
 | ... | | |
 
 ## Dependencies
 
-- **Blocked by:** <US-NNN or "none">
-- **Blocks:** <US-NNN or "none">
+- **Needs to be done first:** <US-NNN title or "none">
+- **Enables:** <US-NNN title or "none">
 
-## Technical Notes
+## Business Rules & Constraints
 
-<Brief implementation hints from tasks.md file references.
-Keep it short — this is for developer context, not a design doc.>
+<Any non-obvious rules that affect this story — rate limits described as
+"max 3 attempts", data retention described as "history available for 90 days",
+permission rules described as "only team admins can do this".
+Write "none" if there are no special rules.>
 
-## Story Points
+## Story Size
 
 **Estimate:** <S / M / L>
-**Phase:** <phase number from tasks.md>
+**Priority:** <Must-have / Should-have / Nice-to-have>
 
 ---
 *Source: `.flow/features/<slug>/spec.md` · `.flow/features/<slug>/tasks.md`*
@@ -141,16 +165,18 @@ Keep it short — this is for developer context, not a design doc.>
 
 ## Summary
 
-| Story | Title | Persona | Size | Phase | Status |
-|-------|-------|---------|------|-------|--------|
-| US-001 | <title> | <persona> | S/M/L | <phase> | Draft |
-| US-002 | <title> | <persona> | S/M/L | <phase> | Draft |
+| Story | Title | Persona | Priority | Size | Status |
+|-------|-------|---------|----------|------|--------|
+| US-001 | <title> | <persona> | Must/Should/Nice | S/M/L | Draft |
+| US-002 | <title> | <persona> | Must/Should/Nice | S/M/L | Draft |
 | ... | | | | | |
 
-## Dependency Graph
+## Suggested Sequence
 
-<List story dependencies in execution order.
-Use plain text, e.g.: US-001 → US-002 → US-004, US-003 (independent)>
+<List stories in recommended delivery order, explained in plain language.
+e.g.: "Start with US-001 (login) since everything else depends on users
+being able to sign in. US-002 and US-003 can be built at the same time.
+US-004 should come last since it builds on all the others.">
 
 ## Coverage Check
 
@@ -187,14 +213,16 @@ Next: copy individual story files to Confluence/Jira
 
 ## Guardrails
 
+- **No technical language in stories.** Never mention APIs, endpoints, databases, schemas, migrations, caches, queues, services, or code patterns in story content. If you catch yourself writing something a non-developer wouldn't understand, rewrite it as the user-visible behavior it produces.
 - Every acceptance check from `spec.md` must appear in at least one story — verify this in `index.md`
-- Stories must be vertically sliced — never "build all models first, then all APIs, then all UI"
+- Stories must be sliced by user outcome — never "build all the backend first, then all the frontend"
 - Each story must have at least 2 acceptance criteria in Given/When/Then format
+- Given/When/Then must describe user actions and observations, not system internals ("user sees a confirmation" not "server returns 201")
 - Never invent requirements not traceable to `spec.md` or `tasks.md`
-- Keep story titles short (< 10 words) — they become Jira ticket titles
+- Keep story titles short (< 10 words) and written from the user's perspective — they become Jira ticket titles
 - Use consistent numbering: US-001, US-002, etc. (zero-padded to 3 digits)
-- Personas must be real roles, not generic ("As a user" is OK only if the product has one user type)
-- Edge cases section can say "none" but cannot be omitted
+- Personas must be specific real roles drawn from the problem domain, not generic "user" or "admin" (unless there truly is only one user type)
+- "What Could Go Wrong" section can say "none" but cannot be omitted
 - Dependencies section must always be present — "none" is a valid value
-- Do not embed code snippets in stories — file references belong in Technical Notes only
+- Business Rules section must always be present — "none" is a valid value
 - Unresolved ambiguity → `AskQuestion`, never guess
