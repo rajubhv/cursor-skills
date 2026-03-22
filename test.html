@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Order scheduling architecture explorer</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background: #fafaf8; color: #2C2C2A; line-height: 1.5; }
+  #root { max-width: 960px; margin: 0 auto; padding: 24px 20px; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #1a1a18; color: #e0ded8; }
+    .card, .tbl-row:nth-child(even), .mini-card, .code-block, .section-card { background: #242422 !important; }
+    .tbl-row { border-color: #333 !important; }
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<script type="text/babel">
+const { useState } = React;
+
+const C = {
+  rx: { bg: "#FAECE7", border: "#F0997B", text: "#712B13", label: "ELEM#RX" },
+  pay: { bg: "#EEEDFE", border: "#AFA9EC", text: "#3C3489", label: "ELEM#PAY" },
+  addr: { bg: "#E1F5EE", border: "#5DCAA5", text: "#085041", label: "SHIP_ADDR" },
+  ship: { bg: "#FAEEDA", border: "#EF9F27", text: "#633806", label: "SHIP_OPTS" },
+  clin: { bg: "#E6F1FB", border: "#85B7EB", text: "#0C447C", label: "CLINICAL" },
+  sel: { bg: "#F1EFE8", border: "#D3D1C7", text: "#444441", label: "SELECTIONS" },
+};
+
+const STEPS = [
+  { num:1, name:"Prescription information", type:"Read + select", tc:"#BA7517", el:["rx"], w:"SELECTIONS.selectedRxIds[]", casc:["pay","ship"], cr:"Rx change recalculates coverage/copay and may affect cold chain shipping requirements", apis:["Rx service","Prescriber svc","Formulary"], rf:["prescriptions[]"], aa:"Reviews prescription list (each Rx has its nested supplies[]). Confirms or modifies which prescriptions to include.", pm:"Are my medications correct?", c2:"Prescription list with selection checkboxes. Each Rx shows linked supplies inside.", c3:"Empty — first step", note:"prescriptions is an array. Each item has a nested supplies[] array. Supplies are part of the Rx, not a separate element." },
+  { num:2, name:"Coverage and estimated costs", type:"Read only", tc:"#0F6E56", el:["pay","rx"], w:null, casc:[], cr:null, apis:[], rf:["paymentSummary"], aa:"Reviews coverage details and estimated copay based on selected Rx. Communicates cost to patient.", pm:"How much will this cost me?", c2:"Coverage breakdown: insurance, copay, estimated cost per Rx", c3:"Rx selections confirmed", note:"paymentSummary is a single object. Copay depends on which prescriptions were selected in step 1." },
+  { num:3, name:"Outstanding balance", type:"Read only", tc:"#0F6E56", el:["pay"], w:null, casc:[], cr:null, apis:[], rf:["paymentMethods[]"], aa:"Reviews outstanding account balance. Discusses payment with patient if past due.", pm:"Do I owe anything from before?", c2:"Balance display with payment history. paymentMethods[] shown for selection.", c3:"Rx + coverage shown", note:"paymentMethods is an array of available payment methods (cards, insurance, etc)." },
+  { num:4, name:"Shipping address", type:"Read + select", tc:"#BA7517", el:["addr"], w:"SELECTIONS.shippingAddressId", casc:["ship"], cr:"Address change recalculates shipping rates and delivery estimates", apis:["Patient profile","Address validation","Geo service"], rf:["shippingAddress","billingAddress"], aa:"Confirms patient's shipping address or adds a new one. Optionally updates billing address.", pm:"Ship to my usual address please.", c2:"Address display with edit/add option. shippingAddress is a single object.", c3:"Rx + coverage + balance shown", note:"shippingAddress and billingAddress are single objects, not arrays." },
+  { num:5, name:"Review supplies", type:"Read + modify", tc:"#185FA5", el:["rx"], w:"SELECTIONS.supplyModifications[]", casc:["pay","ship"], cr:"Supply changes affect coverage total and shipping package weight/cold chain", apis:["Supplies catalog"], rf:["prescriptions[].supplies[]"], aa:"Reviews supplies nested inside each selected prescription. Can add, remove, or modify supply quantities.", pm:"I also need extra test strips.", c2:"Supplies grouped by prescription. Each Rx shows its supplies[].", c3:"+ shipping address", note:"Supplies live inside prescriptions[].supplies[]. Same ELEM#RX item as step 1. Future plan: merge this screen into step 1." },
+  { num:6, name:"Delivery date and shipping options", type:"Read + select", tc:"#BA7517", el:["ship","addr"], w:"SELECTIONS.shippingOptionId, deliveryDateId", casc:[], cr:null, apis:["Carrier svc","Rate calculator","Cold chain validator","Delivery estimator"], rf:["shippingOptions[]","deliveryDates[]"], aa:"Selects shipping option (carrier, speed) and preferred delivery date from available slots.", pm:"When will it arrive?", c2:"Shipping options[] as selectable cards. deliveryDates[] as calendar/list.", c3:"+ supplies reviewed", note:"shippingOptions and deliveryDates are both arrays. Options depend on address (step 4) and Rx/supplies (cold chain from steps 1,5)." },
+  { num:7, name:"Clinical and program offers", type:"Read + enroll", tc:"#BA7517", el:["clin"], w:"SELECTIONS.enrolledPrograms[]", casc:[], cr:null, apis:["Clinical programs","Enrollment service"], rf:["clinicalOffers[]"], aa:"Reviews available clinical programs and special offers. Enrolls patient in relevant programs.", pm:"What programs can help me?", c2:"Program cards with eligibility status and enroll buttons.", c3:"+ delivery date + shipping", note:"Fully isolated element — no cascade. No dependency on other elements." },
+  { num:8, name:"Review and schedule", type:"Submit", tc:"#534AB7", el:["rx","pay","addr","ship","clin"], w:"POST /submit", casc:[], cr:null, apis:["Order submission","Scheduling service"], rf:["all fields"], aa:"Final review of complete order with patient. Validates all elements are present. Confirms and submits.", pm:"Sounds good, let's do it!", c2:"Complete order review — all data from steps 1-7 displayed.", c3:"Full order summary with totals", note:"Reads all elements. POST validates every element is hydrated and every required selection exists before submitting downstream." },
+];
+
+const DDB = [
+  { sk:"META", ttl:"—", src:"System", attrs:"status, patientId, advocateId, channel, createdAt" },
+  { sk:"ELEM#RX", ttl:"4h", src:"Prefetch", attrs:"prescriptions[] (each with nested supplies[]), prescriberId, verifiedAt, refillEligible" },
+  { sk:"ELEM#PAY", ttl:"12h", src:"Prefetch", attrs:"paymentSummary{copay, coverage, estimatedCost}, paymentMethods[], outstandingBalance" },
+  { sk:"ELEM#SHIP_ADDR", ttl:"24h", src:"Prefetch", attrs:"shippingAddress{}, billingAddress{}, validated, validatedAt" },
+  { sk:"ELEM#SHIP_OPTS", ttl:"1h", src:"Prefetch", attrs:"shippingOptions[], deliveryDates[], coldChainRequired" },
+  { sk:"ELEM#CLINICAL", ttl:"24h", src:"Prefetch", attrs:"clinicalOffers[], enrollmentStatus, eligiblePrograms[]" },
+  { sk:"ELEM#SELECTIONS", ttl:"—", src:"Advocate", attrs:"selectedRxIds[], supplyModifications[], shippingAddressId, shippingOptionId, deliveryDateId, enrolledPrograms[]" },
+  { sk:"PREFETCH#STATUS", ttl:"—", src:"System", attrs:"{rx: fresh, pay: stale, ship: missing, addr: fresh, clin: pending}" },
+];
+
+const EVENTS = [
+  { name:"ORDER_ELIGIBLE", prod:"Eligibility system", cons:"Prefetch orchestrator", desc:"Triggers full prefetch" },
+  { name:"PREFETCH_RX", prod:"Orchestrator / GET", cons:"Rx Lambda", desc:"Fetch prescriptions" },
+  { name:"PREFETCH_PAY", prod:"Orchestrator / Cascade", cons:"Payment Lambda", desc:"Fetch copay + balance" },
+  { name:"PREFETCH_SHIP_ADDR", prod:"Orchestrator / GET", cons:"Address Lambda", desc:"Fetch addresses" },
+  { name:"PREFETCH_SHIP_OPTS", prod:"Orchestrator / Cascade", cons:"Shipping Lambda", desc:"Fetch carrier rates" },
+  { name:"PREFETCH_CLINICAL", prod:"Orchestrator / GET", cons:"Clinical Lambda", desc:"Fetch program offers" },
+  { name:"CASCADE_RX_CHANGED", prod:"PATCH /steps/1 or /5", cons:"Cascade handler", desc:"Invalidate PAY + SHIP" },
+  { name:"CASCADE_ADDR_CHANGED", prod:"PATCH /steps/4", cons:"Cascade handler", desc:"Invalidate SHIP_OPTS" },
+  { name:"ORDER_SUBMITTED", prod:"POST /submit", cons:"Fulfillment", desc:"Order sent downstream" },
+];
+
+const PREFETCH_ELEMENTS = [
+  { key:"rx", label:"ELEM#RX", ttl:"4h", staleness:"Low", trigger:"Order eligible", reTrigger:"TTL expired, GET cold start", apis:["Rx service","Prescriber svc","Formulary"], writes:"prescriptions[] (each with nested supplies[]), prescriberId, verifiedAt, refillEligible", cascadedBy:"None (root element)", cascadeTo:"—", duration:"~1-2s", sqsMsg:"PREFETCH_RX" },
+  { key:"pay", label:"ELEM#PAY", ttl:"12h", staleness:"Low-medium", trigger:"Order eligible", reTrigger:"TTL expired, Rx cascade (copay recalc), supply modification cascade", apis:["Payment profile","Insurance verifier","Copay calculator","Benefit checker"], writes:"paymentSummary{copay, coverage, estimatedCost}, paymentMethods[], outstandingBalance", cascadedBy:"Rx change (step 1), supply change (step 5)", cascadeTo:"—", duration:"~2-3s", sqsMsg:"PREFETCH_PAY" },
+  { key:"addr", label:"SHIP_ADDR", ttl:"24h", staleness:"Very low", trigger:"Order eligible", reTrigger:"TTL expired, GET cold start", apis:["Patient profile","Address validation","Geo service"], writes:"shippingAddress{}, billingAddress{}, validated, validatedAt", cascadedBy:"None (stable)", cascadeTo:"—", duration:"~1-2s", sqsMsg:"PREFETCH_SHIP_ADDR" },
+  { key:"ship", label:"SHIP_OPTS", ttl:"1h", staleness:"High", trigger:"Order eligible + address known", reTrigger:"TTL expired, Rx cascade (cold chain), address cascade (rates), supply cascade (weight)", apis:["Carrier service","Rate calculator","Cold chain validator","Delivery estimator"], writes:"shippingOptions[], deliveryDates[], coldChainRequired", cascadedBy:"Rx change (step 1) + supply change (step 5) + address change (step 4)", cascadeTo:"—", duration:"~3-5s", sqsMsg:"PREFETCH_SHIP_OPTS" },
+  { key:"clin", label:"CLINICAL", ttl:"24h", staleness:"Low", trigger:"Order eligible", reTrigger:"TTL expired, GET cold start", apis:["Clinical programs","Enrollment service"], writes:"clinicalOffers[], enrollmentStatus, eligiblePrograms[]", cascadedBy:"None (fully isolated)", cascadeTo:"—", duration:"~1-2s", sqsMsg:"PREFETCH_CLINICAL" },
+];
+
+const Pill = ({e}) => { const c=C[e]; return c ? <span style={{display:"inline-block",padding:"2px 8px",borderRadius:8,fontSize:11,fontWeight:500,background:c.bg,color:c.text,border:`0.5px solid ${c.border}`,margin:"1px 2px"}}>{c.label}</span> : null; };
+const Mini = ({l,v}) => <div style={{background:"#F1EFE8",borderRadius:8,padding:"8px 10px"}}><div style={{fontSize:9,fontWeight:500,color:"#888780",textTransform:"uppercase",letterSpacing:".3px",marginBottom:3}}>{l}</div><div style={{fontSize:11,color:"#2C2C2A",lineHeight:1.5}}>{v}</div></div>;
+const Sec = ({l,children,v,mono}) => <div style={{background:"#F1EFE8",borderRadius:8,padding:"8px 10px",marginBottom:6}}><div style={{fontSize:9,fontWeight:500,color:"#888780",textTransform:"uppercase",letterSpacing:".3px",marginBottom:3}}>{l}</div>{v&&<div style={{fontSize:12,color:"#2C2C2A",lineHeight:1.5,fontFamily:mono?"monospace":"inherit"}}>{v}</div>}{children}</div>;
+
+function StepExplorer() {
+  const [i,setI]=useState(0); const s=STEPS[i];
+  return <div>
+    <div style={{display:"grid",gridTemplateColumns:"repeat(8,1fr)",gap:4,marginBottom:16}}>
+      {STEPS.map((st,j)=><div key={j} onClick={()=>setI(j)} style={{padding:"8px 4px",borderRadius:8,border:j===i?"2px solid #534AB7":"0.5px solid #e0ded8",cursor:"pointer",textAlign:"center",background:j===i?"#EEEDFE":"transparent",transition:"all .15s"}}>
+        <div style={{fontSize:10,color:"#888780"}}>Step {st.num}</div>
+        <div style={{fontSize:11,fontWeight:500,minHeight:28,display:"flex",alignItems:"center",justifyContent:"center",lineHeight:1.3}}>{st.name}</div>
+        <span style={{fontSize:9,padding:"1px 6px",borderRadius:6,background:st.tc+"18",color:st.tc,fontWeight:500}}>{st.type}</span>
+      </div>)}
+    </div>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+      <div>
+        <Sec l="Advocate action" v={s.aa}/>
+        <Sec l="Patient moment"><div style={{fontSize:12,color:"#888780",fontStyle:"italic"}}>"{s.pm}"</div></Sec>
+        <Sec l="DynamoDB elements read">{s.el.map(e=><Pill key={e} e={e}/>)}</Sec>
+        <Sec l="Advocate writes" v={s.w||"None — read-only step"} mono={!!s.w}/>
+      </div>
+      <div>
+        <Sec l="API calls"><div style={{fontFamily:"monospace",fontSize:12,lineHeight:1.8}}>
+          <div>GET /order-schedule/&#123;id&#125;?step={s.num}</div>
+          {s.w&&s.w!=="POST /submit"&&<div>PATCH /order-schedule/&#123;id&#125;/steps/{s.num}</div>}
+          {s.w==="POST /submit"&&<div>POST /order-schedule/&#123;id&#125;/submit</div>}
+        </div></Sec>
+        <Sec l="Internal APIs (if refresh needed)">
+          {s.apis.length>0?s.apis.map((a,j)=><span key={j} style={{display:"inline-block",padding:"2px 8px",borderRadius:8,fontSize:10,background:"#E6F1FB",color:"#042C53",margin:"1px 2px"}}>{a}</span>):<span style={{fontSize:12,color:"#888780"}}>Data already in store</span>}
+        </Sec>
+        <Sec l="Response fields populated">{s.rf.map((f,j)=><span key={j} style={{display:"inline-block",padding:"2px 8px",borderRadius:8,fontSize:10,background:"#E1F5EE",color:"#085041",margin:"1px 2px",fontFamily:"monospace"}}>{f}</span>)}</Sec>
+        {s.casc.length>0&&<div style={{padding:"8px 12px",borderRadius:8,background:"#FCEBEB",border:"0.5px solid #F09595",marginTop:4}}>
+          <div style={{fontSize:10,fontWeight:500,color:"#A32D2D",marginBottom:4}}>CASCADE INVALIDATION</div>
+          <div style={{fontSize:11,color:"#791F1F",lineHeight:1.5}}>Invalidates: {s.casc.map(e=><Pill key={e} e={e}/>)}<div style={{marginTop:4}}>{s.cr}</div></div>
+        </div>}
+      </div>
+    </div>
+    {s.note&&<div style={{marginTop:8,padding:"8px 12px",borderRadius:8,background:"#E6F1FB",border:"0.5px solid #85B7EB"}}>
+      <div style={{fontSize:10,fontWeight:500,color:"#0C447C",marginBottom:3}}>DATA STRUCTURE NOTE</div>
+      <div style={{fontSize:11,color:"#042C53",lineHeight:1.5}}>{s.note}</div>
+    </div>}
+    <div style={{marginTop:8,padding:"10px 14px",borderRadius:8,background:"#EEEDFE"}}>
+      <div style={{fontSize:10,fontWeight:500,color:"#3C3489",marginBottom:4}}>3-COLUMN UI AT THIS STEP</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+        <Mini l="Col 1 — Journey" v={`Step ${s.num} active. ${i>0?i+" complete.":"First step."}`}/>
+        <Mini l="Col 2 — Form" v={s.c2}/>
+        <Mini l="Col 3 — Summary" v={s.c3}/>
+      </div>
+    </div>
+  </div>;
+}
+
+function DynamoTable() {
+  const [hl,setHl]=useState(null);
+  return <div>
+    <div style={{fontFamily:"monospace",fontSize:13,padding:"8px 12px",background:"#F1EFE8",borderRadius:8,marginBottom:12,color:"#444441"}}>PK: ORD#1234 &nbsp;|&nbsp; Single table design &nbsp;|&nbsp; All items under one partition key</div>
+    <div style={{borderRadius:12,border:"0.5px solid #e0ded8",overflow:"hidden"}}>
+      <div style={{display:"grid",gridTemplateColumns:"160px 60px 80px 1fr",background:"#534AB7",padding:"8px 12px",gap:8}}>
+        {["Sort key","TTL","Source","Key attributes"].map(h=><span key={h} style={{fontSize:11,fontWeight:500,color:"#fff"}}>{h}</span>)}
+      </div>
+      {DDB.map((item,j)=>{
+        const ek=item.sk.replace("ELEM#","").replace("SHIP_ADDR","addr").replace("SHIP_OPTS","ship").replace("CLINICAL","clin").replace("SELECTIONS","sel").replace("RX","rx").replace("PAY","pay").replace("PREFETCH#STATUS","").toLowerCase();
+        const c=C[ek];
+        return <div key={j} className="tbl-row" onClick={()=>setHl(hl===j?null:j)} style={{display:"grid",gridTemplateColumns:"160px 60px 80px 1fr",padding:"8px 12px",gap:8,borderBottom:"0.5px solid #e0ded8",cursor:"pointer",background:hl===j?(c?c.bg:"#F1EFE8"):j%2===0?"transparent":"#fafaf8",transition:"all .15s"}}>
+          <span style={{fontSize:12,fontWeight:500,fontFamily:"monospace",color:c?c.text:"#444441"}}>{item.sk}</span>
+          <span style={{fontSize:11,color:"#888780"}}>{item.ttl}</span>
+          <span style={{fontSize:11,padding:"1px 6px",borderRadius:6,background:item.src==="Prefetch"?"#E6F1FB":item.src==="Advocate"?"#FAECE7":"#F1EFE8",color:item.src==="Prefetch"?"#0C447C":item.src==="Advocate"?"#712B13":"#444441",fontWeight:500}}>{item.src}</span>
+          <span style={{fontSize:11,color:"#5F5E5A",lineHeight:1.5}}>{item.attrs}</span>
+        </div>;
+      })}
+    </div>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginTop:12}}>
+      <Mini l="Conditional writes" v="Prefetch writes only if source != advocate."/>
+      <Mini l="Zero contention" v="Each element is a separate item (different SK)."/>
+      <Mini l="Per-item TTL" v="DynamoDB auto-deletes expired items."/>
+    </div>
+  </div>;
+}
+
+function EventCatalog() {
+  const [sel,setSel]=useState(null);
+  return <div>
+    <div style={{borderRadius:12,border:"0.5px solid #e0ded8",overflow:"hidden"}}>
+      <div style={{display:"grid",gridTemplateColumns:"180px 1fr 1fr 1fr",background:"#D4537E",padding:"8px 12px",gap:8}}>
+        {["Event","Producer","Consumer","Description"].map(h=><span key={h} style={{fontSize:11,fontWeight:500,color:"#fff"}}>{h}</span>)}
+      </div>
+      {EVENTS.map((ev,j)=><div key={j} className="tbl-row" onClick={()=>setSel(sel===j?null:j)} style={{display:"grid",gridTemplateColumns:"180px 1fr 1fr 1fr",padding:"8px 12px",gap:8,borderBottom:"0.5px solid #e0ded8",cursor:"pointer",background:sel===j?"#FBEAF0":j%2===0?"transparent":"#fafaf8",transition:"all .15s"}}>
+        <span style={{fontSize:11,fontWeight:500,fontFamily:"monospace",color:"#72243E"}}>{ev.name}</span>
+        <span style={{fontSize:11,color:"#5F5E5A"}}>{ev.prod}</span>
+        <span style={{fontSize:11,color:"#5F5E5A"}}>{ev.cons}</span>
+        <span style={{fontSize:11,color:"#5F5E5A"}}>{ev.desc}</span>
+      </div>)}
+    </div>
+    {sel!==null&&<div style={{marginTop:8,padding:"10px 14px",borderRadius:8,background:"#FBEAF0",border:"0.5px solid #ED93B1"}}>
+      <div style={{fontSize:10,fontWeight:500,color:"#72243E",marginBottom:6}}>SQS MESSAGE SCHEMA</div>
+      <pre style={{fontSize:11,fontFamily:"monospace",color:"#4B1528",lineHeight:1.6,margin:0,whiteSpace:"pre-wrap"}}>{JSON.stringify({orderId:"ORD#1234",element:EVENTS[sel].name,reason:"trigger_or_cascade",triggeredBy:EVENTS[sel].prod,context:{patientId:"PAT#5678"},priority:EVENTS[sel].name.includes("CASCADE")?"high":"normal",attempt:1,maxRetries:3},null,2)}</pre>
+    </div>}
+  </div>;
+}
+
+function ApiRef() {
+  return <div>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+      <div style={{padding:"14px 18px",borderRadius:12,border:"0.5px solid #F0997B",background:"#FAECE7"}}>
+        <div style={{fontSize:14,fontWeight:500,color:"#712B13",marginBottom:8}}>GET /order-schedule/&#123;id&#125;</div>
+        <div style={{fontSize:11,color:"#993C1D",lineHeight:1.6,marginBottom:8}}>Pure reader. Queries DynamoDB, checks freshness, returns immediately. Enqueues async refresh for stale/missing. Never calls external APIs.</div>
+        <div style={{fontSize:10,fontWeight:500,color:"#712B13",marginBottom:4}}>QUERY PARAMETERS</div>
+        <div style={{fontFamily:"monospace",fontSize:11,lineHeight:1.8,color:"#4A1B0C"}}>
+          <div>?step=1..8 <span style={{fontFamily:"sans-serif",color:"#993C1D"}}>— UI navigation</span></div>
+          <div>?include=rx,payment,shipping,address,clinical</div>
+          <div>(no param) <span style={{fontFamily:"sans-serif",color:"#993C1D"}}>— full response</span></div>
+        </div>
+      </div>
+      <div style={{padding:"14px 18px",borderRadius:12,border:"0.5px solid #AFA9EC",background:"#EEEDFE"}}>
+        <div style={{fontSize:14,fontWeight:500,color:"#26215C",marginBottom:8}}>POST /order-schedule/&#123;id&#125;</div>
+        <div style={{fontSize:11,color:"#3C3489",lineHeight:1.6,marginBottom:8}}>Edit steps + submit. PATCH per step updates SELECTIONS and calls relevant internal APIs. POST /submit validates and sends downstream.</div>
+        <div style={{fontSize:10,fontWeight:500,color:"#26215C",marginBottom:4}}>ENDPOINTS</div>
+        <div style={{fontFamily:"monospace",fontSize:11,lineHeight:1.8,color:"#26215C"}}>
+          <div>PATCH /steps/&#123;n&#125; <span style={{fontFamily:"sans-serif",color:"#534AB7"}}>— update one step</span></div>
+          <div>POST /submit <span style={{fontFamily:"sans-serif",color:"#534AB7"}}>— submit complete order</span></div>
+        </div>
+      </div>
+    </div>
+    <div style={{marginTop:12,fontSize:10,fontWeight:500,color:"#444441",marginBottom:6}}>RESPONSE CONTRACT (UNCHANGED)</div>
+    <pre style={{fontSize:11,fontFamily:"monospace",padding:"10px 14px",background:"#F1EFE8",borderRadius:8,lineHeight:1.7,margin:0,color:"#2C2C2A",whiteSpace:"pre-wrap"}}>{`{
+  "stagedOrder": {
+    "prescriptions": [],        // array — each item has nested supplies[]
+    "shippingOptions": [],       // array
+    "deliveryDates": [],         // array
+    "shippingAddress": {},       // single object
+    "billingAddress": {},        // single object
+    "paymentSummary": {},        // single object
+    "paymentMethods": []         // array
+  },
+  "latestOrderState": {
+    ...same 7 fields...,
+    "changeIndicator": "MODIFIED"
+  },
+  "stateSummary": {
+    "soFar": {},  "nextActions": {},
+    "lastUpdatedAt": {},  "updatedBy": ""
+  },
+  "orderJourney": { "steps": [] }
+}`}</pre>
+    <div style={{marginTop:8,padding:"8px 12px",borderRadius:8,background:"#E6F1FB",border:"0.5px solid #85B7EB"}}>
+      <div style={{fontSize:10,fontWeight:500,color:"#0C447C",marginBottom:3}}>DATA TYPE REFERENCE</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,fontSize:11,lineHeight:1.6}}>
+        <div style={{color:"#042C53"}}><b>prescriptions[]</b> — array of Rx, each with nested supplies[]</div>
+        <div style={{color:"#042C53"}}><b>shippingOptions[]</b> — array of carrier options</div>
+        <div style={{color:"#042C53"}}><b>deliveryDates[]</b> — array of available delivery slots</div>
+        <div style={{color:"#042C53"}}><b>paymentMethods[]</b> — array of payment options</div>
+        <div style={{color:"#042C53"}}><b>shippingAddress{}</b> — single object</div>
+        <div style={{color:"#042C53"}}><b>billingAddress{}</b> — single object</div>
+        <div style={{color:"#042C53"}}><b>paymentSummary{}</b> — single object (copay, coverage, totals)</div>
+      </div>
+    </div>
+  </div>;
+}
+
+function CascadeSim() {
+  const [t,setT]=useState(null);
+  const cas={rx:{inv:["pay","ship"],r:"Rx change → copay recalc + cold chain change",s:"Step 1 or 5"},addr:{inv:["ship"],r:"Address change → shipping rates recalc",s:"Step 4"},none:{inv:[],r:"Leaf element — no downstream dependencies",s:"Steps 6, 7"}};
+  const c=t?cas[t]:null;
+  return <div>
+    <div style={{fontSize:12,color:"#888780",marginBottom:10}}>Click to simulate a cascade:</div>
+    <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:16}}>
+      {[{k:"rx",l:"Rx selection changes"},{k:"addr",l:"Address changes"},{k:"none",l:"Delivery / Clinical"}].map(b=>
+        <button key={b.k} onClick={()=>setT(t===b.k?null:b.k)} style={{padding:"8px 16px",borderRadius:20,fontSize:12,cursor:"pointer",border:t===b.k?"2px solid #D4537E":"0.5px solid #e0ded8",background:t===b.k?"#FBEAF0":"transparent",color:t===b.k?"#72243E":"#888780",fontWeight:500,transition:"all .2s"}}>{b.l}</button>
+      )}
+    </div>
+    {c&&<div>
+      <div style={{display:"flex",gap:12,alignItems:"center",justifyContent:"center",padding:"20px 0",flexWrap:"wrap"}}>
+        {t!=="none"&&<Pill e={t==="rx"?"rx":"addr"}/>}
+        {c.inv.length>0&&<span style={{fontSize:20,color:"#E24B4A"}}>→</span>}
+        {c.inv.length>0?c.inv.map(e=><Pill key={e} e={e}/>):<span style={{fontSize:13,color:"#1D9E75",fontWeight:500}}>No cascade — leaf element</span>}
+      </div>
+      <div style={{padding:"10px 14px",borderRadius:8,background:c.inv.length>0?"#FCEBEB":"#E1F5EE",fontSize:12,lineHeight:1.6,color:c.inv.length>0?"#791F1F":"#085041"}}>
+        <div style={{fontWeight:500,marginBottom:4}}>{c.r}</div>
+        <div>Triggered by: {c.s}</div>
+        {c.inv.length>0&&<div style={{marginTop:6,padding:"6px 10px",borderRadius:6,background:"#E6F1FB",color:"#042C53",fontSize:11}}>
+          Eager re-hydration: PATCH immediately enqueues SQS refresh jobs for {c.inv.map(e=>C[e].label).join(" + ")}. Data ready before advocate reaches affected step.
+        </div>}
+      </div>
+    </div>}
+  </div>;
+}
+
+function PrefetchPipeline() {
+  const [selElem,setSelElem]=useState(null);
+  const [simMode,setSimMode]=useState(null);
+  const [simState,setSimState]=useState({rx:"empty",pay:"empty",addr:"empty",ship:"empty",clin:"empty"});
+  const [simLog,setSimLog]=useState([]);
+  const [simRunning,setSimRunning]=useState(false);
+
+  const el=selElem!==null?PREFETCH_ELEMENTS[selElem]:null;
+
+  const wait=(ms)=>new Promise(r=>setTimeout(r,ms));
+  const addLog=(msg,logs)=>[...logs,msg].slice(-6);
+  const setS=(k,v,st)=>({...st,[k]:v});
+
+  async function runSim(mode) {
+    setSimRunning(true);
+    let st={rx:"empty",pay:"empty",addr:"empty",ship:"empty",clin:"empty"};
+    let logs=[];
+    setSimState(st); setSimLog([]); setSimMode(mode);
+
+    if(mode==="eligibility") {
+      logs=addLog("ORDER_ELIGIBLE event fired — DynamoDB Stream detected",logs); setSimLog([...logs]);
+      await wait(500);
+      logs=addLog("Prefetch orchestrator enqueues 5 SQS jobs (one per element)",logs); setSimLog([...logs]);
+      await wait(400);
+
+      st=setS("rx","refreshing",st); st=setS("addr","refreshing",st);
+      setSimState({...st});
+      logs=addLog("PREFETCH_RX + PREFETCH_SHIP_ADDR Lambdas processing...",logs); setSimLog([...logs]);
+      await wait(800);
+      st=setS("addr","fresh",st); setSimState({...st});
+      logs=addLog("SHIP_ADDR written (addresses ready) — TTL: 24h",logs); setSimLog([...logs]);
+      await wait(500);
+      st=setS("rx","fresh",st); setSimState({...st});
+      logs=addLog("RX written (prescriptions + supplies ready) — TTL: 4h",logs); setSimLog([...logs]);
+      await wait(400);
+      st=setS("pay","refreshing",st); st=setS("clin","refreshing",st);
+      setSimState({...st});
+      logs=addLog("PREFETCH_PAY + PREFETCH_CLINICAL processing...",logs); setSimLog([...logs]);
+      await wait(700);
+      st=setS("pay","fresh",st); setSimState({...st});
+      logs=addLog("PAY written (copay + balance + methods) — TTL: 12h",logs); setSimLog([...logs]);
+      await wait(400);
+      st=setS("clin","fresh",st); setSimState({...st});
+      logs=addLog("CLINICAL written (programs + offers) — TTL: 24h",logs); setSimLog([...logs]);
+      await wait(300);
+      st=setS("ship","refreshing",st); setSimState({...st});
+      logs=addLog("PREFETCH_SHIP_OPTS processing (depends on addr + rx)...",logs); setSimLog([...logs]);
+      await wait(900);
+      st=setS("ship","fresh",st); setSimState({...st});
+      logs=addLog("SHIP_OPTS written (carriers + rates) — TTL: 1h. All elements fresh.",logs); setSimLog([...logs]);
+    }
+    else if(mode==="cold_get") {
+      logs=addLog("Advocate opens order — GET /order-schedule/1234",logs); setSimLog([...logs]);
+      await wait(400);
+      logs=addLog("DynamoDB query: no ELEM# items found. PREFETCH#STATUS missing.",logs); setSimLog([...logs]);
+      await wait(300);
+      logs=addLog("GET returns empty placeholders immediately (< 5ms)",logs); setSimLog([...logs]);
+      await wait(300);
+      logs=addLog("GET enqueues 5 SQS refresh jobs (same as eligibility trigger)",logs); setSimLog([...logs]);
+      await wait(400);
+      st=setS("rx","refreshing",st); st=setS("addr","refreshing",st); st=setS("clin","refreshing",st);
+      setSimState({...st});
+      logs=addLog("Lambdas processing: RX, ADDR, CLINICAL...",logs); setSimLog([...logs]);
+      await wait(800);
+      st=setS("rx","fresh",st); st=setS("addr","fresh",st);
+      setSimState({...st});
+      logs=addLog("RX + ADDR ready. UI poll detects fresh data, renders.",logs); setSimLog([...logs]);
+      await wait(500);
+      st=setS("clin","fresh",st); st=setS("pay","refreshing",st);
+      setSimState({...st});
+      logs=addLog("CLINICAL ready. PAY processing...",logs); setSimLog([...logs]);
+      await wait(600);
+      st=setS("pay","fresh",st); st=setS("ship","refreshing",st);
+      setSimState({...st});
+      logs=addLog("PAY ready. SHIP_OPTS processing (last — depends on RX + ADDR)...",logs); setSimLog([...logs]);
+      await wait(800);
+      st=setS("ship","fresh",st); setSimState({...st});
+      logs=addLog("All elements fresh. Full render. Total async time: ~4-8 seconds.",logs); setSimLog([...logs]);
+    }
+    else if(mode==="cascade") {
+      st={rx:"fresh",pay:"fresh",addr:"fresh",ship:"fresh",clin:"fresh"};
+      setSimState({...st});
+      logs=addLog("All elements fresh. Advocate at step 1.",logs); setSimLog([...logs]);
+      await wait(600);
+      logs=addLog("Advocate changes Rx selection — PATCH /steps/1",logs); setSimLog([...logs]);
+      await wait(400);
+      st=setS("pay","stale",st); st=setS("ship","stale",st);
+      setSimState({...st});
+      logs=addLog("CASCADE: PAY marked stale (copay recalc), SHIP_OPTS marked stale (cold chain)",logs); setSimLog([...logs]);
+      await wait(300);
+      logs=addLog("Eager re-hydration: PREFETCH_PAY + PREFETCH_SHIP_OPTS enqueued with new Rx context",logs); setSimLog([...logs]);
+      await wait(400);
+      st=setS("pay","refreshing",st); setSimState({...st});
+      logs=addLog("PREFETCH_PAY Lambda recalculating copay with updated Rx...",logs); setSimLog([...logs]);
+      await wait(700);
+      st=setS("pay","fresh",st); setSimState({...st});
+      logs=addLog("PAY re-computed. New copay written to DynamoDB.",logs); setSimLog([...logs]);
+      await wait(300);
+      st=setS("ship","refreshing",st); setSimState({...st});
+      logs=addLog("PREFETCH_SHIP_OPTS Lambda recalculating rates + cold chain...",logs); setSimLog([...logs]);
+      await wait(800);
+      st=setS("ship","fresh",st); setSimState({...st});
+      logs=addLog("SHIP_OPTS re-computed. Advocate navigates to step 2 — copay is ready.",logs); setSimLog([...logs]);
+    }
+    setSimRunning(false);
+  }
+
+  const stColors={fresh:{bg:"#E1F5EE",border:"#5DCAA5",text:"#085041"},stale:{bg:"#FAEEDA",border:"#EF9F27",text:"#633806"},refreshing:{bg:"#E6F1FB",border:"#85B7EB",text:"#042C53"},empty:{bg:"#F1EFE8",border:"#D3D1C7",text:"#888780"}};
+
+  return <div>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:16}}>
+      <div style={{padding:"14px 18px",borderRadius:12,border:"0.5px solid #85B7EB",background:"#E6F1FB"}}>
+        <div style={{fontSize:14,fontWeight:500,color:"#042C53",marginBottom:6}}>What is prefetching?</div>
+        <div style={{fontSize:12,color:"#0C447C",lineHeight:1.6}}>A background process that prepares order data before the advocate's call. When the advocate opens the order, most data is already in DynamoDB — sub-5ms reads with zero external API calls.</div>
+      </div>
+      <div style={{padding:"14px 18px",borderRadius:12,border:"0.5px solid #5DCAA5",background:"#E1F5EE"}}>
+        <div style={{fontSize:14,fontWeight:500,color:"#085041",marginBottom:6}}>Key principle</div>
+        <div style={{fontSize:12,color:"#0F6E56",lineHeight:1.6}}>Element-level, not monolithic. Each element prefetches independently via its own SQS job + Lambda. If one fails, the others succeed. Partial prefetch is fine — missing elements refresh on-demand.</div>
+      </div>
+    </div>
+
+    <div style={{fontSize:13,fontWeight:500,color:"#2C2C2A",marginBottom:8}}>Three triggers for prefetch jobs</div>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:16}}>
+      <div style={{padding:"10px 12px",borderRadius:8,background:"#F1EFE8",borderLeft:"3px solid #378ADD",borderRadius:0}}>
+        <div style={{fontSize:11,fontWeight:500,color:"#0C447C",marginBottom:3}}>1. Eligibility event</div>
+        <div style={{fontSize:11,color:"#5F5E5A",lineHeight:1.5}}>Order becomes eligible. DynamoDB Stream fires. All 5 elements prefetched. Runs minutes/hours before the call.</div>
+      </div>
+      <div style={{padding:"10px 12px",borderRadius:8,background:"#F1EFE8",borderLeft:"3px solid #D85A30",borderRadius:0}}>
+        <div style={{fontSize:11,fontWeight:500,color:"#993C1D",marginBottom:3}}>2. GET cold/stale</div>
+        <div style={{fontSize:11,color:"#5F5E5A",lineHeight:1.5}}>Advocate opens order, element missing or TTL expired. GET returns immediately, enqueues refresh for stale elements only.</div>
+      </div>
+      <div style={{padding:"10px 12px",borderRadius:8,background:"#F1EFE8",borderLeft:"3px solid #D4537E",borderRadius:0}}>
+        <div style={{fontSize:11,fontWeight:500,color:"#72243E",marginBottom:3}}>3. Cascade re-hydration</div>
+        <div style={{fontSize:11,color:"#5F5E5A",lineHeight:1.5}}>Advocate changes Rx or address. Dependent elements marked stale. Eager refresh enqueued immediately with new context.</div>
+      </div>
+    </div>
+
+    <div style={{fontSize:13,fontWeight:500,color:"#2C2C2A",marginBottom:8}}>Per-element prefetch details</div>
+    <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:4,marginBottom:8}}>
+      {PREFETCH_ELEMENTS.map((pe,j)=>{
+        const c=C[pe.key];
+        return <div key={j} onClick={()=>setSelElem(selElem===j?null:j)} style={{padding:"8px 6px",borderRadius:8,border:selElem===j?`2px solid ${c.border}`:`0.5px solid #e0ded8`,cursor:"pointer",textAlign:"center",background:selElem===j?c.bg:"transparent",transition:"all .15s"}}>
+          <div style={{fontSize:11,fontWeight:500,color:c.text}}>{pe.label}</div>
+          <div style={{fontSize:9,color:"#888780",marginTop:2}}>TTL: {pe.ttl}</div>
+          <div style={{fontSize:9,color:pe.staleness==="High"?"#A32D2D":pe.staleness.includes("medium")?"#854F0B":"#0F6E56",marginTop:1}}>Staleness: {pe.staleness}</div>
+        </div>;
+      })}
+    </div>
+
+    {el&&<div style={{padding:"14px 18px",borderRadius:12,border:`0.5px solid ${C[el.key].border}`,background:C[el.key].bg,marginBottom:12}}>
+      <div style={{fontSize:14,fontWeight:500,color:C[el.key].text,marginBottom:8}}>{el.label} prefetch details</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+        <Sec l="Internal APIs called">{el.apis.map((a,j)=><span key={j} style={{display:"inline-block",padding:"2px 8px",borderRadius:8,fontSize:10,background:"#fff",color:"#042C53",margin:"1px 2px",border:"0.5px solid #e0ded8"}}>{a}</span>)}</Sec>
+        <Sec l="DynamoDB attributes written" v={el.writes} mono/>
+        <Sec l="Prefetch trigger" v={el.trigger}/>
+        <Sec l="Re-trigger conditions" v={el.reTrigger}/>
+        <Sec l="Cascaded by" v={el.cascadedBy}/>
+        <Sec l="Typical Lambda duration" v={el.duration}/>
+      </div>
+      <div style={{marginTop:8,padding:"8px 10px",borderRadius:6,background:"#fff",border:"0.5px solid #e0ded8"}}>
+        <div style={{fontSize:9,fontWeight:500,color:"#888780",textTransform:"uppercase",marginBottom:3}}>SQS message</div>
+        <pre style={{fontSize:10,fontFamily:"monospace",color:"#2C2C2A",lineHeight:1.5,margin:0,whiteSpace:"pre-wrap"}}>{JSON.stringify({orderId:"ORD#1234",element:el.sqsMsg,reason:"eligibility_or_cascade",context:{patientId:"PAT#5678"},priority:"normal",attempt:1,maxRetries:3},null,2)}</pre>
+      </div>
+    </div>}
+
+    <div style={{fontSize:13,fontWeight:500,color:"#2C2C2A",marginBottom:8,marginTop:16}}>Prefetch pipeline simulator</div>
+    <div style={{display:"flex",gap:6,marginBottom:10,flexWrap:"wrap"}}>
+      {[{k:"eligibility",l:"Eligibility trigger (full prefetch)"},{k:"cold_get",l:"Cold GET (no prefetch exists)"},{k:"cascade",l:"Rx change cascade"}].map(b=>
+        <button key={b.k} onClick={()=>!simRunning&&runSim(b.k)} disabled={simRunning} style={{padding:"6px 14px",borderRadius:16,fontSize:11,cursor:simRunning?"default":"pointer",border:simMode===b.k?"none":"0.5px solid #e0ded8",background:simMode===b.k?"#534AB7":"transparent",color:simMode===b.k?"#fff":"#888780",fontWeight:500,transition:"all .2s",opacity:simRunning&&simMode!==b.k?.4:1}}>{b.l}</button>
+      )}
+      {simMode&&<button onClick={()=>{setSimMode(null);setSimState({rx:"empty",pay:"empty",addr:"empty",ship:"empty",clin:"empty"});setSimLog([]);}} style={{padding:"6px 14px",borderRadius:16,fontSize:11,cursor:"pointer",border:"0.5px solid #e0ded8",background:"transparent",color:"#888780"}}>Reset</button>}
+    </div>
+
+    <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:4,marginBottom:8}}>
+      {PREFETCH_ELEMENTS.map((pe,j)=>{
+        const st=simState[pe.key];
+        const sc=stColors[st];
+        return <div key={j} style={{padding:"8px 6px",borderRadius:8,border:`0.5px solid ${sc.border}`,background:sc.bg,textAlign:"center",transition:"all .4s"}}>
+          <div style={{fontSize:10,fontWeight:500,color:sc.text}}>{pe.label}</div>
+          <div style={{fontSize:10,color:sc.text,marginTop:2}}>{st}</div>
+        </div>;
+      })}
+    </div>
+    <div style={{display:"flex",gap:8,marginBottom:8,flexWrap:"wrap"}}>
+      {Object.entries(stColors).map(([k,v])=><div key={k} style={{display:"flex",alignItems:"center",gap:3,fontSize:10,color:"#888780"}}><div style={{width:8,height:8,borderRadius:4,background:v.border}}/>{k}</div>)}
+    </div>
+
+    {simLog.length>0&&<div style={{padding:"10px 14px",borderRadius:8,background:"#F1EFE8",fontSize:11,color:"#5F5E5A",lineHeight:1.7}}>
+      {simLog.map((l,j)=><div key={j} style={{borderBottom:j<simLog.length-1?"0.5px solid #e0ded8":"none",padding:"2px 0"}}>{l}</div>)}
+    </div>}
+
+    <div style={{marginTop:16,display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+      <div style={{padding:"10px 14px",borderRadius:8,background:"#E1F5EE",border:"0.5px solid #5DCAA5"}}>
+        <div style={{fontSize:11,fontWeight:500,color:"#085041",marginBottom:4}}>GET path guarantee</div>
+        <div style={{fontSize:11,color:"#0F6E56",lineHeight:1.5}}>The GET never makes external API calls. It reads DynamoDB, returns what's available ({'<'}5ms), and triggers async refresh for anything stale or missing. The advocate never waits.</div>
+      </div>
+      <div style={{padding:"10px 14px",borderRadius:8,background:"#FAEEDA",border:"0.5px solid #EF9F27"}}>
+        <div style={{fontSize:11,fontWeight:500,color:"#633806",marginBottom:4}}>SQS deduplication</div>
+        <div style={{fontSize:11,color:"#854F0B",lineHeight:1.5}}>FIFO queue with dedup ID = orderId + element + 30s window. If advocate changes Rx twice quickly, only the latest refresh runs. Prevents wasted Lambda invocations.</div>
+      </div>
+    </div>
+  </div>;
+}
+
+function App() {
+  const [sec,setSec]=useState("steps");
+  const tabs={steps:"Step explorer",prefetch:"Prefetch pipeline",dynamo:"DynamoDB table",events:"Event catalog",api:"API reference",cascade:"Cascade simulator"};
+  return <div>
+    <div style={{marginBottom:20}}>
+      <h1 style={{fontSize:22,fontWeight:500,color:"#2C2C2A",marginBottom:4}}>Order scheduling architecture explorer</h1>
+      <p style={{fontSize:13,color:"#888780"}}>Interactive reference for the patient care advocate order scheduling platform</p>
+    </div>
+    <div style={{display:"flex",gap:6,marginBottom:16,flexWrap:"wrap"}}>
+      {Object.entries(tabs).map(([k,v])=><button key={k} onClick={()=>setSec(k)} style={{padding:"6px 16px",borderRadius:20,fontSize:12,cursor:"pointer",border:sec===k?"none":"0.5px solid #e0ded8",background:sec===k?"#534AB7":"transparent",color:sec===k?"#fff":"#888780",fontWeight:500,transition:"all .2s"}}>{v}</button>)}
+    </div>
+    {sec==="steps"&&<StepExplorer/>}
+    {sec==="prefetch"&&<PrefetchPipeline/>}
+    {sec==="dynamo"&&<DynamoTable/>}
+    {sec==="events"&&<EventCatalog/>}
+    {sec==="api"&&<ApiRef/>}
+    {sec==="cascade"&&<CascadeSim/>}
+    <div style={{marginTop:24,padding:"10px 14px",borderRadius:8,background:"#F1EFE8",fontSize:11,color:"#888780",textAlign:"center"}}>
+      Order scheduling platform — architecture reference — 2 product APIs, 1 DynamoDB table, async prefetch
+    </div>
+  </div>;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
