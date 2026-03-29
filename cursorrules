@@ -1,0 +1,247 @@
+# Cursor Rules — Workflow-First API Development
+
+## CRITICAL: Never write custom imperative business logic
+
+When building new API endpoints, event handlers, or background jobs, you MUST
+define business logic as a **workflow definition** using our step-based workflow
+engine. Do NOT write custom if/else chains, nested service calls, or inline
+validation logic.
+
+## CRITICAL: Step Functions Migration Mode
+
+This project is actively migrating AWS Step Functions state machines into our
+workflow engine, exposed as **synchronous HTTP APIs**. When you see Step Functions
+code (ASL JSON, CDK constructs, SAM templates), convert using the mapping in
+`docs/step-functions-migration-guide.md`. Key rules:
+
+1. **Task → API_CALL** (Lambda body becomes a service method)
+2. **Choice → RULE_CHECK chain** (each branch = separate rule check)
+3. **Pass/Parameters → DATA_EXTRACTION** (field mapping)
+4. **DynamoDB Task → DB_OPERATION**
+5. **Wait → REMOVE** (compute timestamp instead, or return PENDING status)
+6. **Parallel → FLATTEN** to sequential steps (or batch service method)
+7. **Retry/Catch → REMOVE** (framework handles circuit breaking/backoff)
+8. **Wrap in Express route** that maps workflow outcomes to HTTP status codes
+
+Never preserve async polling. Every Step Functions execution becomes a
+synchronous workflow.execute() call returning a JSON response.
+
+## Architecture overview
+
+Every business process in this codebase is expressed as a **workflow** — an
+ordered array of **steps** executed by a generic workflow engine. The engine
+handles execution, logging, circuit breaking, and error propagation. Developers
+only author the declarative workflow definition.
+
+## Step types (use ONLY these)
+
+| Type               | Purpose                        | Key fields                              |
+|--------------------|--------------------------------|-----------------------------------------|
+| `API_CALL`         | Call an internal service       | `api.method`, `api.params`, `storeAs`   |
+| `RULE_CHECK`       | Evaluate a business rule       | `ruleName`, `onPass`, `onFail`          |
+| `DATA_EXTRACTION`  | Pull fields from context       | `extract: { key: '$.path' }`, `storeAs` |
+| `DATA_LOOKUP`      | Find item in a stored array    | `source`, `match`, `storeAs`            |
+| `DB_OPERATION`     | Read/write to database         | `operation`, `table`, `data`, `storeAs` |
+
+## Mandatory patterns
+
+### 1. Fetch before check
+Always fetch required data (API_CALL) before validating it (RULE_CHECK).
+The storeAs value from the fetch must be available before any step that
+references it via $.
+
+### 2. Guard clause pattern
+Use RULE_CHECK steps with `onFail: { action: 'STOP_EXIT' }` as early
+guard clauses. Validate preconditions before doing any data mutations.
+
+```
+fetch data → check condition 1 → check condition 2 → ... → mutate
+```
+
+### 3. Context passing via storeAs / $.references
+Every step that produces data must use `storeAs` to name its output.
+Downstream steps reference it via `$.storedName.path.to.field`.
+Never pass data between steps any other way.
+
+### 4. One responsibility per step
+Each step does ONE thing. Don't combine data extraction and transformation
+in a DB_OPERATION step. Instead:
+- DATA_EXTRACTION step to shape the data
+- DB_OPERATION step to write the shaped data
+
+### 5. Rule definitions live in the rules registry
+When adding a RULE_CHECK step, you must ALSO register the corresponding
+rule in `src/rules/registry.ts`. Use `json-rules-engine` conditions format.
+The `ruleName` in the step MUST match the registered rule's `name` field.
+
+### 6. HTTP route outcome mapping
+Every workflow exposed via HTTP MUST map outcomes to status codes:
+- COMPLETED → 201 (created) or 200 (success)
+- STOP_EXIT → 200 with `success: false` (business rule prevented action)
+- FAIL_JOB → 422 (unprocessable — business logic failure)
+- RUN_WORKFLOW chain → map based on which sub-workflow ran
+- Infra errors → 500 (caught by error middleware)
+
+### 7. Step Functions Wait states
+In sync HTTP flows, Wait states are invalid. Either:
+- Compute a scheduled timestamp and store it (return immediately)
+- Return a PENDING status and handle follow-up via webhook/cron
+- Create a separate status-check endpoint for polling
+
+### 8. Step Functions Parallel branches
+Flatten to sequential steps. If latency is critical, create a
+single service method that does parallel fetches internally and
+expose it as one API_CALL step.
+
+## Template for new workflows
+
+```typescript
+export const workflowRules = {
+  'your-workflow-name': {
+    trigger: 'your-trigger-event',
+    steps: [
+      // Step 1: Fetch required data
+      {
+        id: 'fetch-primary-data',
+        type: WORKFLOW_RULES_TYPES.API_CALL,
+        api: {
+          method: 'service.getResource',
+          params: ['$.event.detail.properties.resourceId'],
+        },
+        storeAs: 'primaryData',
+      },
+      // Step 2-N: Guard clause checks
+      {
+        id: 'check-precondition',
+        type: WORKFLOW_RULES_TYPES.RULE_CHECK,
+        ruleName: 'domain.precondition-name',
+        onFail: { action: 'STOP_EXIT' },
+        onPass: { action: 'CONTINUE' },
+      },
+      // Step N+1: Extract/transform data
+      {
+        id: 'extract-details',
+        type: WORKFLOW_RULES_TYPES.DATA_EXTRACTION,
+        extract: {
+          fieldA: '$.primaryData.nested.fieldA',
+          fieldB: '$.primaryData.nested.fieldB',
+        },
+        storeAs: 'extractedDetails',
+      },
+      // Final step: Write result
+      {
+        id: 'create-record',
+        type: WORKFLOW_RULES_TYPES.DB_OPERATION,
+        operation: 'create',
+        table: 'your-table',
+        data: {
+          fieldA: '$.extractedDetails.fieldA',
+          fieldB: '$.extractedDetails.fieldB',
+          status: 'CREATED',
+        },
+        storeAs: 'createdRecord',
+      },
+    ],
+  },
+};
+```
+
+## Template for HTTP routes wrapping workflows
+
+```typescript
+router.post('/api/v1/resource', async (req, res, next) => {
+  try {
+    const event = {
+      type: 'resource-action-event',
+      detail: {
+        timestamp: new Date().toISOString(),
+        properties: { ...req.body, ...req.params },
+      },
+    };
+
+    const result = await workflowEngine.execute('workflow-name', event);
+
+    switch (result.outcome) {
+      case 'COMPLETED':
+        return res.status(201).json({ success: true, data: result.context.finalStep });
+      case 'STOP_EXIT':
+        return res.status(200).json({ success: false, reason: result.stoppedAt });
+      case 'FAIL_JOB':
+        return res.status(422).json({ error: result.failReason });
+    }
+  } catch (error) { next(error); }
+});
+```
+
+## What NOT to do
+
+```typescript
+// ❌ WRONG: Custom imperative logic
+async function handlePriorAuth(req) {
+  const prescription = await prescriptionService.get(req.prescriptionId);
+  const insurance = await insuranceService.getCoverage(prescription.insuranceId);
+  if (!insurance.formulary.covered) {
+    return { status: 'DENIED' };
+  }
+  if (insurance.formulary.priorAuthRequired) {
+    const submission = await priorAuthService.submit(prescription, insurance);
+    return { status: 'PENDING', submissionId: submission.id };
+  }
+  const approval = await priorAuthService.autoApprove(prescription, insurance);
+  await db.priorAuthRecords.create({ ...approval, status: 'APPROVED' });
+  return { status: 'APPROVED', approvalId: approval.id };
+}
+
+// ❌ WRONG: Keeping Step Functions async pattern
+const execution = await stepFunctions.startExecution({ ... });
+// poll for result...
+const result = await stepFunctions.describeExecution({ executionArn });
+
+// ✅ RIGHT: Workflow definition + sync HTTP route (see templates above)
+```
+
+## RuleOutcome actions
+
+| Action         | Behavior                                             |
+|----------------|------------------------------------------------------|
+| `CONTINUE`     | Proceed to next step                                 |
+| `STOP_EXIT`    | Halt workflow cleanly (no error)                     |
+| `FAIL_JOB`     | Halt workflow with error                             |
+| `RUN_WORKFLOW` | Chain to another workflow (requires `workflow` field) |
+| `<step-id>`    | Jump to a specific step in current workflow          |
+
+## File locations
+
+| What                    | Where                                         |
+|-------------------------|-----------------------------------------------|
+| Workflow definitions    | `src/workflows/definitions/*.ts`              |
+| Rule registrations      | `src/rules/registry.ts`                       |
+| Workflow engine         | `src/workflows/engine.ts` (DO NOT MODIFY)     |
+| Step type interfaces    | `src/workflows/types.ts` (DO NOT MODIFY)      |
+| Workflow validator      | `src/workflows/validator.ts`                  |
+| Workflow tests          | `src/workflows/__tests__/*.test.ts`           |
+| HTTP routes             | `src/routes/*.routes.ts`                      |
+| Migration guide         | `docs/step-functions-migration-guide.md`      |
+| Conversion examples     | `docs/examples/step-functions-conversion.ts`  |
+
+## When generating tests
+
+For every new workflow, generate:
+1. A **validator test** that runs the workflow definition through WorkflowValidator
+2. A **happy path integration test** that mocks API_CALL responses and asserts the
+   final DB_OPERATION was called with the correct data
+3. A **guard clause test per RULE_CHECK** that verifies STOP_EXIT halts execution
+4. An **HTTP route test** that sends a request and asserts the response status/body
+
+## Checklist before completing any workflow task
+
+- [ ] All business logic is in workflow steps, not custom code
+- [ ] Steps are ordered so storeAs outputs precede $.references
+- [ ] Every RULE_CHECK has a matching entry in rules/registry.ts
+- [ ] No duplicate step IDs
+- [ ] DB_OPERATION data mappings use only simple $.references
+- [ ] HTTP route maps all outcomes (COMPLETED, STOP_EXIT, FAIL_JOB, RUN_WORKFLOW)
+- [ ] No Wait states — async follow-ups use webhooks or separate endpoints
+- [ ] No Parallel branches — flattened or wrapped in batch service method
+- [ ] Tests cover happy path + each guard clause + HTTP response codes
+- [ ] WorkflowValidator.validateAllOrThrow() passes
