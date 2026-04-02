@@ -1,0 +1,81 @@
+---
+description: 7-phase migration playbook for converting step functions to TypeScript
+globs:
+alwaysApply: false
+---
+
+# Migration Playbook — 7 Phases
+
+Follow these phases IN ORDER for each step function.
+ASL files are in: step_functions/
+DynamoDB mapping is in: dynamodb-config-test.csv
+Common Lambda is in: crm-common-api-handler/
+Target repo is: pharmacy-api-order-schedule/
+Analysis output goes in: migration-analysis/<step-function-name>/
+
+## Phase 1: State Inventory
+Read the ASL file. List every state:
+- Name, type, 1-line summary
+- Next state(s)
+- Has Output/Parameters transform? (yes/no)
+- Has Retry/Catch? (yes/no)
+- Is it inside a Parallel branch? (yes — which branch)
+For Parallel states specifically: list each branch and all states within it.
+Output: logic-map.md (State Inventory + Happy Path)
+
+## Phase 2: API Call Catalog
+Find every Task state calling crm-common-api-handler. Extract:
+- apiParamName → look up in dynamodb-config-test.csv → final URL
+- method, queryParams/body (note template expressions)
+- Retry config
+- Response envelope path
+Output: service-registry.md
+
+## Phase 3: Database Operations
+Find every Task state that interacts with MongoDB Atlas. Extract:
+- Collection name, operation type, query filter
+- What fields are returned or updated
+- Which later states consume the result
+- All access patterns
+- Proposed DynamoDB single table key schema (PK, SK, GSIs)
+- MongoDB document to DynamoDB item mapping
+Output: db-migration.md
+
+## Phase 4: Transform Inventory
+Find every state with Output/Parameters/ResultSelector containing
+template expressions. For each:
+- Raw data read path (through response envelope)
+- Transform logic in plain English
+- Output shape (becomes a TypeScript interface)
+- Complexity rating (Low/Medium/High)
+Output: transform-inventory.md
+
+## Phase 5: Decision Logic
+Find all Choice states. For each:
+- What variable, from which earlier state
+- Every comparison rule + target
+- Nested Choice chains
+- Default branch
+Output: rules-inventory.md
+
+## Phase 6: Code Structure Planning
+Using Phase 1-5 outputs, plan the TypeScript code structure:
+- Group related states into service classes or modules
+- Identify shared utility functions (date parsing, null handling, etc.)
+- Map each service to existing common-adapter methods
+- Define TypeScript interfaces for all data shapes
+- Plan which transforms become standalone pure functions
+- Identify Parallel branches that become Promise.all() groups
+Output: logic-map.md (Code Structure section)
+
+## Phase 7: Conversion
+Per module/service, write TypeScript code in pharmacy-api-order-schedule:
+- Service classes using common-adapter for HTTP calls
+- DynamoDB operations using DocumentClient (single table design)
+- Pure transform functions extracted from Output blocks
+- TypeScript interfaces for all request/response shapes
+- if/else or switch for Choice state logic
+- Promise.all() for Parallel states — each branch becomes an async function,
+  all run concurrently. Use Promise.allSettled() if branches need error isolation.
+- Error handling with try/catch replacing Retry/Catch blocks
+Output: TypeScript files in pharmacy-api-order-schedule/src/

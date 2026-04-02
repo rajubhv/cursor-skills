@@ -1,0 +1,80 @@
+---
+description: Guide for converting MongoDB Atlas operations to DynamoDB single table design
+globs: step_functions/**/*.json
+alwaysApply: false
+---
+
+# MongoDB to DynamoDB Single Table Design
+
+## Purpose
+
+Some step functions read/write to MongoDB Atlas. These operations must be
+converted to DynamoDB using single table design.
+
+## Identifying MongoDB Operations in Step Functions
+
+Look for Task states that:
+- Call a Lambda with MongoDB connection logic (not crm-common-api-handler)
+- Have apiParamName values that reference MongoDB collections
+- Contain Output blocks that reference MongoDB document structures
+  (nested objects, arrays of subdocuments, ObjectId references)
+
+## Single Table Design Principles
+
+All entities go into ONE DynamoDB table. Differentiate using key structure:
+
+- PK (Partition Key): identifies the entity group (e.g., PATIENT#123)
+- SK (Sort Key): identifies the specific entity or relationship (e.g., ORDER#456)
+- GSI1PK / GSI1SK: Global Secondary Index for alternate access patterns
+- GSI2PK / GSI2SK: Second GSI if needed
+- Entity: a type attribute on every item (e.g., "Patient", "Order")
+
+## MongoDB to DynamoDB Mapping
+
+### Document Structure
+- Nested objects → flatten into attributes or split into separate items
+- Arrays of subdocuments → each subdocument becomes its own item with shared PK
+- ObjectId references → encode as PK/SK relationships
+- Flexible schema → define strict TypeScript interface per Entity type
+
+### Operations
+| MongoDB Operation | DynamoDB Equivalent | TypeScript |
+|---|---|---|
+| findOne({ _id }) | GetItem (PK + SK) | docClient.get() |
+| find({ field: value }) | Query on GSI | docClient.query() |
+| find().sort() | Query with SK sort | docClient.query() with ScanIndexForward |
+| aggregate pipeline | Multiple queries + TypeScript transform | query then map/filter/reduce |
+| updateOne({ _id }, { $set }) | UpdateItem | docClient.update() with UpdateExpression |
+| insertOne(doc) | PutItem | docClient.put() |
+| deleteOne({ _id }) | DeleteItem | docClient.delete() |
+| find with $in | BatchGetItem (up to 100) | docClient.batchGet() |
+| Transactions | TransactWriteItems | docClient.transactWrite() |
+
+### Data Types
+| MongoDB Type | DynamoDB Type | Notes |
+|---|---|---|
+| String | S | Direct mapping |
+| Number | N | Stored as string-encoded number |
+| Boolean | BOOL | Direct mapping |
+| Date | S or N | ISO 8601 string or epoch milliseconds |
+| ObjectId | S | Store as string |
+| Array of primitives | L or SS/NS | Use Set types if values are unique |
+| Array of objects | Separate items | Each object becomes its own item sharing the PK |
+| Nested object | M (Map) | OK for small, always-read-together data |
+| null | NULL | Direct mapping |
+
+## Access Pattern Analysis
+
+Before designing the key schema, extract EVERY access pattern from the step function:
+1. How is the data queried? (by patient ID, order ID, date range, etc.)
+2. How is the data written? (create, update specific fields, append to arrays)
+3. What gets read together? (items always fetched in the same state)
+4. What gets written together? (items that must update atomically)
+5. Are there any range queries? (date ranges, status filters)
+
+Document access patterns in this format:
+
+| Access Pattern | Source State | Current MongoDB Query | Proposed PK | Proposed SK | Index |
+|---|---|---|---|---|---|
+| Get patient orders | FetchOrders | db.orders.find({ patientId }) | PATIENT#patientId | ORDER#orderId | Table |
+| Get order by ID | GetOrder | db.orders.findOne({ _id }) | ORDER#orderId | METADATA | GSI1 |

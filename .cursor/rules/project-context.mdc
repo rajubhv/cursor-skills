@@ -1,0 +1,42 @@
+---
+description: Project context and workspace layout for step function migration
+globs:
+alwaysApply: true
+---
+
+# Step Function to Node.js TypeScript Migration
+
+## Goal
+Convert AWS Step Functions into a standard Node.js TypeScript API.
+No workflow engine or orchestration framework — just clean TypeScript
+services, functions, and routes.
+
+## Workspace Layout
+- step_functions/ — ASL JSON files for all step functions being migrated
+- dynamodb-config-test.csv — maps apiParamName constants to actual API URLs
+- crm-common-api-handler/ — shared Lambda that proxies all HTTP calls
+  (DUMB PROXY — zero business logic, just resolves apiParamName via
+  DynamoDB and makes the HTTP call)
+- pharmacy-api-order-schedule/ — TARGET repo where the TypeScript API lives.
+  Uses a common-adapter dependency for making external HTTP calls.
+- migration-analysis/ — per-step-function analysis artifacts
+
+## Architecture Reality
+- crm-common-api-handler is a DUMB HTTP PROXY:
+  receives apiParamName + method + params + headers,
+  looks up apiParamName in DynamoDB to get domain + path,
+  makes the HTTP call, returns raw response
+- ALL business logic is in the Step Function ASL:
+  Choice states = if/else branching
+  Output/Parameters blocks with template expressions = data transforms
+  Response envelope: states.result.Payload.body.apiResponse.responseBody.{data}
+- Some step functions use MongoDB Atlas for database operations.
+  These must be converted to DynamoDB using single table design.
+
+## Migration Target
+- Plain TypeScript services and functions in pharmacy-api-order-schedule
+- HTTP calls use common-adapter (check existing adapters before creating new ones)
+- Database operations use DynamoDB (single table design)
+- Business logic becomes TypeScript functions — if/else, map, filter, reduce
+- Parallel states use Promise.all() — preserve parallel execution, do NOT convert to sequential
+- No Lambda indirection, no DynamoDB lookup for API URLs — call external APIs directly

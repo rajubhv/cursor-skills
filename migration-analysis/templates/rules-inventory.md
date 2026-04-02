@@ -2,9 +2,10 @@
 
 Extracted from Choice states.
 
-| # | State Name | Reads From | Condition | True → | False/Default → | Nested Under | json-rules-engine condition |
-|---|-----------|-----------|-----------|--------|----------------|-------------|---------------------------|
-|   |           |           |           |        |                |             |                           |
+| # | State Name | Reads From | Condition | True Target | False/Default Target | Nested Under | TypeScript Equivalent |
+|---|-----------|-----------|-----------|------------|--------------------|--------------|--------------------|
+|   |           |           |           |            |                    |              | if/else or switch  |
 
 ## Decision Trees
-(Cursor will draw these as nested lists showing Choice → Choice chains)
+
+(Show nested Choice chains as indented lists)

@@ -1,0 +1,126 @@
+---
+description: Guide for analyzing step function ASL files and mapping states to TypeScript code
+globs: step_functions/**/*.json
+alwaysApply: false
+---
+
+# Step Function Analysis Skill
+
+## Purpose
+
+Reusable guide for analyzing ANY step function ASL file in step_functions/
+and extracting structured migration artifacts into migration-analysis/.
+
+## Common Lambda Call Pattern (crm-common-api-handler)
+
+Every Task state calling crm-common-api-handler has these fields:
+
+- Type: Task
+- Resource: arn:aws:states:::lambda:invoke
+- Arguments.FunctionName: contains "common-api-c1" in the ARN
+- Arguments.Payload.inputBody:
+  - apiParamName: a string constant like "get-memberships-benefits" (DynamoDB lookup key)
+  - method: "GET" or "POST"
+  - queryParams: object with key-value pairs, values often use template syntax
+  - body: object for POST requests, same template syntax
+- Arguments.Payload.headers: usually passed through from execution input
+- Retry: array of retry configs (ErrorEquals, IntervalSeconds, MaxAttempts, BackoffRate, JitterStrategy)
+- Output: THIS IS WHERE BUSINESS LOGIC HIDES — contains template expressions with transforms
+
+## Resolving Final URLs
+
+1. Extract the apiParamName value from the Task state
+2. Open dynamodb-config-test.csv in the workspace root
+3. Find the row matching that apiParamName
+4. The CSV gives you the domain + path = the ACTUAL external API URL
+5. Combine with method, queryParams/body from the ASL to get the full call spec
+
+## State Type to TypeScript Mapping
+
+| ASL State Type | TypeScript Equivalent | What to Extract |
+|---|---|---|
+| Task calling crm-common-api-handler | async function using common-adapter | apiParamName, resolve URL from CSV, method, params |
+| Task calling another specific Lambda | async function | Read that Lambda's handler for actual logic |
+| Task with SDK integration (DynamoDB) | DynamoDB DocumentClient call | Table, operation, key schema |
+| Task with MongoDB operations | DynamoDB DocumentClient call (single table design) | Collection, query, document shape |
+| Choice | if/else or switch statement | Variable, operator, value, branches |
+| Choice chain (nested) | if/else if/else or extracted validation function | Full decision tree |
+| Pass with transforms in Output | TypeScript function (map, filter, reduce) | Input fields, transform operations, output shape |
+| Pass simple (just forwarding) | variable assignment or spread | Result and ResultPath |
+| Map (iterator) | Array.map() or for...of with async calls | Iterator config, item processing |
+| Parallel | Promise.all() with each branch as an async function | All branches, join logic, error handling |
+| Wait | (likely not needed in sync API) | Document why it exists |
+| Succeed | return response | Final response shape |
+| Fail | throw error | Error type and message |
+
+## Output Block Analysis — Where Business Logic Hides
+
+When a Task or Pass state has an Output block containing template expressions,
+it is doing data transformation. This becomes a TypeScript function.
+
+### Step A — Identify the raw data source
+
+The response from crm-common-api-handler is deeply nested:
+
+    states.result.Payload.body.apiResponse.responseBody.{actual data}
+
+In TypeScript this becomes simply the response from common-adapter — no envelope.
+
+### Step B — List every transform operation
+
+Look for these patterns and their TypeScript equivalents:
+
+- $filter(array, function) → Array.filter()
+- $toMillis(dateValue, formatString) → new Date(dateValue).getTime()
+- $uppercase(string) → string.toUpperCase()
+- $format(value, pattern) → date-fns format or template literal
+- Null coalescing (expDate = null or expDate >= now) → ?? operator or optional chaining
+- Array indexing [0] → array[0] or array.find()
+- Field extraction → destructuring or pick utility
+- Inline function definitions → arrow functions
+
+### Step C — Document the output shape
+
+What fields does the transform produce? These become TypeScript interfaces.
+
+### Step D — Rate complexity
+
+- Low: Simple field rename or extraction → destructuring
+- Medium: Filtering, null handling, string transforms → small utility function
+- High: Date-based filtering, multi-step array operations, nested filtering
+  → dedicated transform function with unit tests
+
+## Retry Configuration Mapping
+
+ASL Retry blocks become try/catch with retry logic in TypeScript:
+
+| ASL Retry Field | TypeScript Equivalent |
+|---|---|
+| ErrorEquals | catch block error type check |
+| IntervalSeconds | initial delay in ms |
+| MaxAttempts | max retry count |
+| BackoffRate | multiplier for exponential backoff |
+| JitterStrategy | Math.random() based jitter |
+
+Common-adapter may already handle retries — check before adding custom retry logic.
+
+## Mapping to pharmacy-api-order-schedule
+
+1. Check common-adapter first — look in pharmacy-api-order-schedule for
+   existing adapters before writing new HTTP call functions
+
+2. Each ASL Task with an Output block becomes:
+   - An async function that calls the external API via common-adapter
+   - A separate pure function that transforms the response
+   - A TypeScript interface for the input and output shapes
+
+3. Each Choice state becomes an if/else block or a dedicated validation function
+
+4. Each Parallel state becomes Promise.all() with each branch as a separate async function:
+   - Extract each branch into its own async function
+   - Run all branches concurrently with Promise.all()
+   - Collect results into a combined object matching the original ResultPath
+   - If the Parallel state has a Catch block, wrap Promise.all() in try/catch
+   - If individual branches need error isolation, use Promise.allSettled() instead
+
+5. Data flow between states becomes function parameters and return values
